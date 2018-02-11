@@ -1,5 +1,5 @@
-from pyramid.config import Configurator
 import os
+from pyramid.config import Configurator
 
 
 def main(global_config, **settings):

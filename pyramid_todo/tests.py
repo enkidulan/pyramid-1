@@ -1,19 +1,23 @@
 """Tests of the Pyramid To Do List."""
 from datetime import datetime
 from faker import Faker
+from collections import OrderedDict
+import pytest
 from pyramid.httpexceptions import (
-    HTTPNotFound
+    HTTPNotFound,
+    HTTPForbidden,
 )
 from pyramid_todo.models import (
     Task, Profile
 )
+from unittest import mock
 
 
 DATE_FMT = '%d/%m/%Y %H:%M:%S'
 FAKE = Faker()
 def parse_cookies(cookies_list):
     """Parse response cookies into individual key-value pairs."""
-    return dict(map(lambda x: x.split('='), cookies_list.split('; ')))    
+    return dict(map(lambda x: x.split('='), cookies_list.split('; ')))
 
 
 def test_profile_to_dict_is_dict_of_profile_attributes(profile):
@@ -63,21 +67,23 @@ def test_task_assigned_to_profile_in_profile_task_list(db_session, profile):
     assert task in profile.tasks
 
 
-def test_get_profile_returns_none_with_no_profiles(dummy_request):
-    """get_profile will attempt to find the given profile but finds none if none exist."""
-    from pyramid_todo.views.main import get_profile
-    assert get_profile(dummy_request, 'nhuntwalker') is None
+def test_get_user_returns_none_with_no_profiles(dummy_request):
+    """get_user will attempt to find the given profile but finds none if none exist."""
+    from pyramid_todo.security import get_user
+    dummy_request.matchdict['username'] = 'nhuntwalker'
+    assert get_user(dummy_request) is None
 
 
-def test_get_profile_returns_none_with_wrong_profile(db_session, dummy_request, profile):
-    """get_profile will attempt to find the profile to match the given username but return None if no profile exists."""
-    from pyramid_todo.views.main import get_profile
-    assert get_profile(dummy_request, 'nhuntwalker') is None
+def test_get_user_returns_none_with_wrong_profile(db_session, dummy_request, profile):
+    """get_user will attempt to find the profile to match the given username but return None if no profile exists."""
+    from pyramid_todo.security import get_user
+    dummy_request.matchdict['username'] = 'nhuntwalker'
+    assert get_user(dummy_request) is None
 
 
-def test_get_profile_returns_correct_profile(db_session, dummy_request):
-    """get_profile will return the profile matching the given username."""
-    from pyramid_todo.views.main import get_profile
+def test_get_user_returns_correct_profile(db_session, dummy_request):
+    """get_user will return the profile matching the given username."""
+    from pyramid_todo.security import get_user
     db_session.add(Profile(
         username='nhuntwalker',
         email=FAKE.email(),
@@ -85,7 +91,9 @@ def test_get_profile_returns_correct_profile(db_session, dummy_request):
         date_joined=FAKE.date_time()
     ))
     db_session.commit()
-    profile = get_profile(dummy_request, 'nhuntwalker')
+    with mock.patch('pyramid.testing.DummyRequest.unauthenticated_userid') as mocked:
+        mocked.__get__ = mock.Mock(return_value='nhuntwalker')
+        profile = get_user(dummy_request)
     assert profile is not None
     assert isinstance(profile, Profile)
     assert profile.username == 'nhuntwalker'
@@ -95,38 +103,42 @@ def test_info_view_returns_dict_of_routes_and_methods(dummy_request):
     """The info_view should show information about available routes and allowed HTTP methods."""
     from pyramid_todo.views.main import info_view
     response = info_view(dummy_request)
-    assert response == {
-        'info': 'GET /api/v1',
-        'register': 'POST /api/v1/accounts',
-        'single profile detail': 'GET /api/v1/accounts/<username>',
-        'edit profile': 'PUT /api/v1/accounts/<username>',
-        'delete profile': 'DELETE /api/v1/accounts/<username>',
-        'login': 'POST /api/v1/accounts/login',
-        'logout': 'GET /api/v1/accounts/logout',
-        "user's tasks": 'GET /api/v1/accounts/<username>/tasks',
-        "create task": 'POST /api/v1/accounts/<username>/tasks',
-        "task detail": 'GET /api/v1/accounts/<username>/tasks/<id>',
-        "task update": 'PUT /api/v1/accounts/<username>/tasks/<id>',
-        "delete task": 'DELETE /api/v1/accounts/<username>/tasks</id>'
-    }
+    assert response == OrderedDict((
+        ('info', 'GET /api/v1'),
+        ('register', 'POST /api/v1/accounts'),
+        ('single profile detail', 'GET /api/v1/accounts/<username>'),
+        ('edit profile', 'PUT /api/v1/accounts/<username>'),
+        ('delete profile', 'DELETE /api/v1/accounts/<username>'),
+        ('login', 'POST /api/v1/accounts/login'),
+        ('logout', 'GET /api/v1/accounts/logout'),
+        ('user\'s tasks', 'GET /api/v1/accounts/<username>/tasks'),
+        ('create task', 'POST /api/v1/accounts/<username>/tasks'),
+        ('task detail', 'GET /api/v1/accounts/<username>/tasks/<id>'),
+        ('task update', 'PUT /api/v1/accounts/<username>/tasks/<id>'),
+        ('delete task', 'DELETE /api/v1/accounts/<username>/tasks/<id>'),
+    ))
 
 
-def test_tasks_list_with_no_users_returns_notfound(dummy_request):
+def test_tasks_list_with_no_users_returns_notfound(testapp, fill_db):
     """Cannot get tasks from user when no users exist."""
-    from pyramid_todo.views.main import tasks_list
-    dummy_request.matchdict['username'] = 'nhuntwalker'
-    response = tasks_list(dummy_request)
-    assert isinstance(response, dict)
-    assert response == {'error': 'The profile does not exist'}
+    data_dict = {
+        'username': 'nhuntwalker',
+        'password': 'potato'
+    }
+    testapp.post_json('/api/v1/accounts/login', data_dict)
+    response = testapp.get('/api/v1/accounts/qwe/tasks', status=403)
+    assert response.json == {'error': 'You are not allowed'}
 
 
-def test_tasks_list_with_bad_username_returns_notfound(dummy_request, profile):
+def test_tasks_list_with_bad_username_returns_not_allowed(testapp, fill_db):
     """Cannot get tasks if the nonexistent user is entered."""
-    from pyramid_todo.views.main import tasks_list
-    dummy_request.matchdict['username'] = 'nhuntwalker'
-    response = tasks_list(dummy_request)
-    assert isinstance(response, dict)
-    assert response == {'error': 'The profile does not exist'}
+    data_dict = {
+        'username': 'nhuntwalker',
+        'password': 'potato'
+    }
+    testapp.post_json('/api/v1/accounts/login', data_dict)
+    response = testapp.get('/api/v1/accounts/qwerty/tasks', status=403)
+    assert response.json == {'error': 'You are not allowed'}
 
 
 def test_successful_login_adds_auth_tkt_cookie(testapp, fill_db):
@@ -134,7 +146,7 @@ def test_successful_login_adds_auth_tkt_cookie(testapp, fill_db):
         'username': 'nhuntwalker',
         'password': 'potato'
     }
-    response = testapp.post('/api/v1/accounts/login', data_dict)
+    response = testapp.post_json('/api/v1/accounts/login', data_dict)
     cookies = parse_cookies(response.headers['Set-Cookie'])
     assert response.status_code == 202
     assert not (cookies['auth_tkt'] == '')
@@ -145,7 +157,7 @@ def test_bad_username_prevents_login(testapp, fill_db):
         'username': 'flergtheblerg',
         'password': 'potato'
     }
-    response = testapp.post('/api/v1/accounts/login', data_dict, status=400)
+    response = testapp.post_json('/api/v1/accounts/login', data_dict, status=400)
     assert response.status_code == 400
 
 
@@ -153,7 +165,7 @@ def test_missing_fields_prevents_login(testapp, fill_db):
     data_dict = {
         'username': 'flergtheblerg'
     }
-    response = testapp.post('/api/v1/accounts/login', data_dict, status=400)
+    response = testapp.post_json('/api/v1/accounts/login', data_dict, status=400)
     assert response.status_code == 400
 
 
@@ -162,7 +174,7 @@ def test_logging_out_removes_auth_tks_from_headers(testapp, fill_db):
         'username': 'nhuntwalker',
         'password': 'potato'
     }
-    response = testapp.post('/api/v1/accounts/login', data_dict)
+    response = testapp.post_json('/api/v1/accounts/login', data_dict)
     cookies = parse_cookies(response.headers['Set-Cookie'])
     assert not (cookies['auth_tkt'] == '')
 
@@ -178,7 +190,7 @@ def test_successful_creates_profile(testapp):
         'password2': 'potato',
         'email': 'nicholas@huntwalker.com',
     }
-    testapp.post('/api/v1/accounts', data_dict)
+    testapp.post_json('/api/v1/accounts', data_dict)
     response = testapp.get('/api/v1/accounts/nicholas')
     assert response.status_code == 200
     assert 'nicholas@huntwalker.com' in response.ubody
@@ -191,7 +203,7 @@ def test_cant_register_same_username_twice(testapp, fill_db):
         'password2': 'potato',
         'email': FAKE.email(),
     }
-    response = testapp.post('/api/v1/accounts', data_dict, status=400)
+    response = testapp.post_json('/api/v1/accounts', data_dict, status=400)
     assert response.status_code == 400
     assert response.json == {'error': 'Username "nhuntwalker" is already taken'}
 
@@ -203,7 +215,7 @@ def test_cant_register_mismatched_passwords(testapp):
         'password2': 'potahto',
         'email': FAKE.email(),
     }
-    response = testapp.post('/api/v1/accounts', data_dict, status=400)
+    response = testapp.post_json('/api/v1/accounts', data_dict, status=400)
     assert response.status_code == 400
     assert response.json == {'error': "Passwords don't match"}
 
@@ -214,14 +226,14 @@ def test_cant_register_missing_fields(testapp):
         'password': 'potato',
         'password2': 'potahto',
     }
-    response = testapp.post('/api/v1/accounts', data_dict, status=400)
+    response = testapp.post_json('/api/v1/accounts', data_dict, status=400)
     assert response.status_code == 400
     assert response.json == {'error': 'Some fields are missing'}
 
 
 def test_unauthenticated_user_cant_delete_existing_profile(testapp):
     response = testapp.delete('/api/v1/accounts/nhuntwalker', status=403)
-    assert response.json == {'error': 'You do not have permission to access this profile.'}
+    assert response.json == {'error': 'You are not allowed'}
 
 
 def test_authenticated_user_can_delete_existing_profile(testapp):
@@ -231,7 +243,7 @@ def test_authenticated_user_can_delete_existing_profile(testapp):
         'password2': 'potato',
         'email': 'mr@meeseeks.com'
     }
-    testapp.post('/api/v1/accounts', data_dict)
+    testapp.post_json('/api/v1/accounts', data_dict)
     response = testapp.delete('/api/v1/accounts/meeseeks', status=204)
     assert response.json_body is None
 
@@ -243,7 +255,7 @@ def test_authenticated_user_can_edit_existing_profile(testapp):
         'password2': 'potato',
         'email': 'mr@meeseeks.com'
     }
-    testapp.post('/api/v1/accounts', data_dict)
+    testapp.post_json('/api/v1/accounts', data_dict)
     response = testapp.put('/api/v1/accounts/meeseeks', {'email': 'mee@seeks.com'})
     assert response.json['profile']['email'] == 'mee@seeks.com'
 
@@ -252,15 +264,15 @@ def test_user1_cannot_edit_user2_profile(testapp):
     user1 = {'username': 'foobar', 'password': 'potato', 'password2': 'potato', 'email': 'foo@bar.com'}
     user2 = {'username': 'barfoo', 'password': 'potato', 'password2': 'potato', 'email': 'bar@foo.com'}
 
-    testapp.post('/api/v1/accounts', user1)
-    testapp.post('/api/v1/accounts', user2)
+    testapp.post_json('/api/v1/accounts', user1)
+    testapp.post_json('/api/v1/accounts', user2)
 
     response = testapp.put('/api/v1/accounts/foobar', {'username': 'tugboat'}, status=403)
-    assert response.json == {'error': 'You do not have permission to access this profile.'}
+    assert response.json == {'error': 'You are not allowed'}
 
 
 def test_user_can_view_own_tasks(testapp):
-    testapp.post('/api/v1/accounts/login', {'username': 'nhuntwalker', 'password': 'potato'})
+    testapp.post_json('/api/v1/accounts/login', {'username': 'nhuntwalker', 'password': 'potato'})
     response = testapp.get('/api/v1/accounts/nhuntwalker/tasks')
     profile = testapp.get('/api/v1/accounts/nhuntwalker')
     for task in profile.json['tasks']:
@@ -270,7 +282,7 @@ def test_user_can_view_own_tasks(testapp):
 
 def test_users_cannot_see_each_others_tasks(testapp):
     response = testapp.get('/api/v1/accounts/barfoo/tasks', status=403)
-    assert response.json == {'error': 'You do not have permission to access this data.'}
+    assert response.json == {'error': 'You are not allowed'}
 
 
 def test_user_can_create_task(testapp):
@@ -280,7 +292,7 @@ def test_user_can_create_task(testapp):
         'due_date': '01/01/2020 00:00:00',
         'completed': False
     }
-    response = testapp.post('/api/v1/accounts/nhuntwalker/tasks', new_task)
+    response = testapp.post_json('/api/v1/accounts/nhuntwalker/tasks', new_task)
     assert response.json == {'msg': 'posted'}
 
 
@@ -291,8 +303,8 @@ def test_users_cannot_make_tasks_for_other_users(testapp):
         'due_date': '01/01/2020 00:00:00',
         'completed': False
     }
-    response = testapp.post('/api/v1/accounts/barfoo/tasks', new_task, status=403)
-    assert response.json == {'error': 'You do not have permission to access this data.'}
+    response = testapp.post_json('/api/v1/accounts/barfoo/tasks', new_task, status=403)
+    assert response.json == {'error': 'You are not allowed'}
 
 
 def test_users_cannot_make_tasks_for_nonexistent_profiles(testapp):
@@ -302,8 +314,8 @@ def test_users_cannot_make_tasks_for_nonexistent_profiles(testapp):
         'due_date': '01/01/2020 00:00:00',
         'completed': False
     }
-    response = testapp.post('/api/v1/accounts/flergblerg/tasks', new_task, status=404)
-    assert response.json == {'error': 'The profile does not exist'}
+    response = testapp.post_json('/api/v1/accounts/flergblerg/tasks', new_task, status=403)
+    assert response.json == {'error': 'You are not allowed'}
 
 
 def test_users_can_see_details_of_own_task(testapp):
@@ -315,18 +327,18 @@ def test_users_can_see_details_of_own_task(testapp):
 
 def test_users_cant_see_tasks_they_dont_own(testapp):
     response = testapp.get('/api/v1/accounts/nhuntwalker/tasks/50000', status=404)
-    assert response.json == {'username': 'nhuntwalker', 'task': None}
+    assert response.json == {'error': 'Page not found'}
 
 
 def test_users_cant_see_other_user_individual_tasks_whether_exist_or_not(testapp):
-    response = testapp.get('/api/v1/accounts/barfoo/tasks/50', status=403)
-    assert response.json == {'error': 'You do not have permission to access this data.'}
+    response = testapp.get('/api/v1/accounts/barfoo/tasks/50', status=404)
+    assert response.json == {'error': 'Page not found'}
 
 
 def test_users_can_update_own_task(testapp):
     one_task = testapp.get('/api/v1/accounts/nhuntwalker/tasks').json['tasks'][0]
     update_dict = {'name': 'Pay all your bills'}
-    response = testapp.put('/api/v1/accounts/nhuntwalker/tasks/{}'.format(one_task['id']), update_dict)
+    response = testapp.put_json('/api/v1/accounts/nhuntwalker/tasks/{}'.format(one_task['id']), update_dict)
     one_task['name'] = 'Pay all your bills'
     assert response.json == {
         'username': 'nhuntwalker',
@@ -337,13 +349,13 @@ def test_users_can_update_own_task(testapp):
 def test_users_cannot_update_nonexistent_task(testapp):
     update_dict = {'name': 'Pay all your bills'}
     response = testapp.put('/api/v1/accounts/nhuntwalker/tasks/50000', update_dict, status=404)
-    assert response.json == {'username': 'nhuntwalker', 'task': None}
+    assert response.json == {'error': 'Page not found'}
 
 
 def test_users_cannot_update_other_user_task(testapp):
     update_dict = {'name': 'Pay all your bills'}
-    response = testapp.put('/api/v1/accounts/barfoo/tasks/10', update_dict, status=403)
-    assert response.json == {'error': 'You do not have permission to access this data.'}
+    response = testapp.put('/api/v1/accounts/barfoo/tasks/10', update_dict, status=404)
+    assert response.json == {'error': 'Page not found'}
 
 
 def test_users_can_delete_tasks(testapp):
@@ -353,5 +365,5 @@ def test_users_can_delete_tasks(testapp):
 
 
 def test_users_cannot_delete_other_user_tasks(testapp):
-    response = testapp.delete('/api/v1/accounts/barfoo/tasks/5000', status=403)
-    assert response.json == {'error': 'You do not have permission to access this profile.'}
+    response = testapp.delete('/api/v1/accounts/barfoo/tasks/5000', status=404)
+    assert response.json == {'error': 'Page not found'}

@@ -8,6 +8,7 @@ from sqlalchemy import (
     ForeignKey
 )
 from sqlalchemy.orm import relationship
+from pyramid.security import Allow
 
 
 DATE_FMT = '%d/%m/%Y %H:%M:%S'
@@ -15,6 +16,10 @@ DATE_FMT = '%d/%m/%Y %H:%M:%S'
 
 class Profile(Base):
     __tablename__ = 'profiles'
+
+    def __acl__(self):
+        return [(Allow, 'user:' + self.username, 'manage'), ]
+
     id = Column(Integer, primary_key=True)
     username = Column(Unicode, nullable=False)
     email = Column(Unicode, nullable=False)
@@ -39,6 +44,12 @@ class Profile(Base):
 
 class Task(Base):
     __tablename__ = 'tasks'
+
+    def __acl__(self):
+        return [(Allow, 'user:' + self.profile.username, 'manage'), ]
+
+    _editable_fields = ['name', 'note', 'due_date', 'completed']
+
     id = Column(Integer, primary_key=True)
     name = Column(Unicode, nullable=False)
     note = Column(Unicode)
